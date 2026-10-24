@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# deskfx-bake: record the deskfx animation loops panefx plays on the Windows desktop
+# (panefx src/loops/deskfx.rs), with c4nvas's own `bake` (the same frames, timing, seam
+# and encoder as the loops of the Linux background), at the size of each screen.
+#
+# usage: deskfx-bake [-o LOOPS] [-T THEMES] [-s WxH@SCALE]... [-f FIRST]
+#                    THEME|all NAME|all [PERCENT ...|all]
+#
+#   LOOPS    panefx's deskfx loop folder (default $DESKFX_LOOPS). Its `screens` file
+#            lists the screens, one "WIDTH HEIGHT SCALE" per line (pixels, DPI scale);
+#            each -s replaces that list with the screens given. Every loop goes to
+#            LOOPS/WIDTHxHEIGHT/THEME/NAME@PERCENT.mp4, with NAME@PERCENT.mp4.grid.
+#   THEMES   the palettes, THEMES/<id>/colors.toml (default $DESKFX_THEMES).
+#   THEME    a theme id, or all = every folder in THEMES (-f FIRST bakes FIRST first).
+#   NAME     an animation (`deskfx -list`, plus flames = c4nvas's fire), or all.
+#   PERCENT  glyph sizes (c4nvas SCALES: 200 150 125 100 85 70 60 50 40 33), or all.
+#
+# c4nvas reads the screen size, the theme and the loop folder from HOME, so it runs once
+# per (screen, theme) in a private HOME under $XDG_STATE_HOME/deskfx-bake, at nice 19.
+# Loops already on disk are skipped: a stopped run is resumed by starting it again.
+#
+# Needs: bash, python3 with python3-gi, python3-cairo and the Pango typelibs, ffmpeg
+# with libx264, the font "BigBlueTerm437 Nerd Font Mono"; and in LIB ($DESKFX_BAKE_LIB,
+# default this script's folder): c4nvas, c4nvas-bake.py, deskfx (a Linux build of
+# deskfx) and fonts.conf.
+set -euo pipefail
+
+LIB=${DESKFX_BAKE_LIB:-$(dirname "$(readlink -f "$0")")}
+LOOPS=${DESKFX_LOOPS:-}
+THEMES=${DESKFX_THEMES:-}
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/deskfx-bake
+FIRST=
+SCREENS=()
+
+usage() { sed -n '4,6p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+while getopts "o:T:s:f:h" opt; do
+	case $opt in
+	o) LOOPS=$OPTARG ;;
+	T) THEMES=$OPTARG ;;
+	s) SCREENS+=("$OPTARG") ;;
+	f) FIRST=$OPTARG ;;
+	*) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -ge 2 ] || usage
+[ -n "$LOOPS" ] || { echo "deskfx-bake: no loop folder (-o or DESKFX_LOOPS)" >&2; exit 2; }
+[ -n "$THEMES" ] || { echo "deskfx-bake: no theme folder (-T or DESKFX_THEMES)" >&2; exit 2; }
+theme_arg=$1 name=$2
+shift 2
+percents=("$@")
+[ ${#percents[@]} -gt 0 ] || percents=(all)
+
+for f in c4nvas c4nvas-bake.py deskfx fonts.conf; do
+	[ -e "$LIB/$f" ] || { echo "deskfx-bake: $LIB/$f is missing" >&2; exit 1; }
+done
+
+# The screens: "WIDTH HEIGHT SCALE" lines, from -s or from panefx's screens file.
+lines=()
+if [ ${#SCREENS[@]} -gt 0 ]; then
+	for s in "${SCREENS[@]}"; do
+		[[ $s =~ ^([0-9]+)x([0-9]+)(@([0-9.]+))?$ ]] || { echo "deskfx-bake: bad screen '$s' (WxH@SCALE)" >&2; exit 2; }
+		lines+=("${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[4]:-1}")
+	done
+elif [ -r "$LOOPS/screens" ]; then
+	while read -r w h s _; do
+		[ -n "${w:-}" ] && lines+=("$w $h ${s:-1}")
+	done <"$LOOPS/screens"
+fi
+[ ${#lines[@]} -gt 0 ] || { echo "deskfx-bake: no screens (no $LOOPS/screens, no -s)" >&2; exit 1; }
+
+# The themes, FIRST first.
+themes=()
+if [ "$theme_arg" = all ]; then
+	[ -n "$FIRST" ] && [ -d "$THEMES/$FIRST" ] && themes+=("$FIRST")
+	for d in "$THEMES"/*/; do
+		t=$(basename "$d")
+		[ "$t" = "$FIRST" ] || themes+=("$t")
+	done
+else
+	themes=("$theme_arg")
+fi
+
+# home_for W H SCALE THEME: a HOME holding exactly what c4nvas reads.
+home_for() {
+	local w=$1 h=$2 s=$3 t=$4
+	local home=$STATE/${w}x${h}@$s/$t
+	mkdir -p "$home/.cache/c4nvas" "$home/.config/paint3r" "$home/Programs/bin" "$LOOPS/${w}x${h}"
+	# c4nvas's screen file is the LOGICAL size and the scale; it records pixels = size x scale.
+	awk -v w="$w" -v h="$h" -v s="$s" 'BEGIN { printf "%.6f %.6f %s\n", w / s, h / s, s }' \
+		>"$home/.cache/c4nvas/screen"
+	printf '%s\n' "$t" >"$home/.config/paint3r/theme"
+	ln -sfn "$LOOPS/${w}x${h}" "$home/.cache/c4nvas/loops"
+	ln -sfn "$THEMES" "$home/.config/themes"
+	ln -sfn "$LIB/deskfx" "$home/Programs/bin/deskfx"
+	printf '%s\n' "$home"
+}
+
+failed=0
+for t in "${themes[@]}"; do
+	[ -f "$THEMES/$t/colors.toml" ] || [ "$t" = slop ] || [ "$t" = aether ] ||
+		{ echo "deskfx-bake: no palette $THEMES/$t/colors.toml" >&2; failed=1; continue; }
+	for line in "${lines[@]}"; do
+		read -r w h s <<<"$line"
+		home=$(home_for "$w" "$h" "$s" "$t")
+		echo "deskfx-bake: $(date '+%F %T') ${w}x${h}@$s $t $name ${percents[*]}"
+		if ! HOME=$home FONTCONFIG_FILE=$LIB/fonts.conf nice -n 19 \
+			python3 "$LIB/c4nvas-bake.py" "$LIB/c4nvas" bake "$name" "${percents[@]}"; then
+			failed=1
+		fi
+	done
+done
+echo "deskfx-bake: $(date '+%F %T') done"
+exit $failed

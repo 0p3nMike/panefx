@@ -1,0 +1,22 @@
+/target
+*.log
+/target-portable
+
+# Preview frames from `cargo run --example wizardtorch_preview`.
+wt-*.ppm
+wt-*.png
+fx-*.ppm
+fx-*.png
+icon-preview-*.png
+icon-decoded.png
+
+# Python bytecode from the generators (gen_ans.py and friends).
+# __pycache__/gen_ans.cpython-314.pyc was tracked, which is how a build artefact
+# tied to one interpreter version ended up in history: a .pyc is regenerated on
+# every import and says nothing a reader needs.
+__pycache__/
+*.pyc
+
+# AI-session handoff notes: local working notes, not part of the public tree.
+HANDOFF.md
+GUI-HANDOFF.md

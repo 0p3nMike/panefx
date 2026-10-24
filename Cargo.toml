@@ -1,0 +1,137 @@
+[package]
+name = "panefx"
+version = "0.2.1"
+edition = "2021"
+description = "Animated backdrops pinned behind windows, following a tiling WM's layout"
+
+
+[lib]
+name = "panefx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "panefx"
+path = "src/main.rs"
+
+[[bin]]
+name = "panefx-ctl"
+path = "src/bin/panefx-ctl.rs"
+
+[[bin]]
+name = "panefx-gui"
+path = "src/bin/panefx-gui.rs"
+
+# The beta installer. A real .exe rather than the .ps1 it replaces, because a
+# .ps1 cannot be relied on to run from a double-click: no file association, a
+# Restricted execution policy, and Mark of the Web on anything extracted from a
+# downloaded zip each block it SILENTLY.
+[[bin]]
+name = "panefx-setup"
+path = "src/bin/panefx-setup.rs"
+
+# The tester-facing diagnostic. An .exe for the same reason as the installer:
+# someone whose panefx is broken should not also have to fight the tool that
+# diagnoses it.
+[[bin]]
+name = "panefx-report"
+path = "src/bin/panefx-report.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = "0.24"
+ratatui = "0.29"
+crossterm = "0.28"
+# The GUI. See src/win98.rs for why one exists at all when the TUI works.
+#
+# GLOW, NOT WGPU, and default features OFF. eframe's default backend is wgpu,
+# which pulls `windows 0.62` while panefx pins `windows 0.58` for its own Win32
+# and DirectComposition work. Two major versions of that crate in one binary do
+# not merely coexist -- wgpu-hal's DX12 backend fails to compile against the
+# wrong one, with a wall of trait errors pointing into other people's crates
+# rather than at the real cause. Measured, not guessed: the build failed exactly
+# this way before the switch.
+#
+# glow is an OpenGL backend with no windows-crate dependency at all, so the
+# conflict cannot recur. For a control panel drawing rectangles and text it is
+# also the right tool -- nothing here needs a GPU compute pipeline.
+eframe = { version = "0.36", default-features = false, features = [
+  "glow",
+  "default_fonts",
+] }
+
+# The `implement` macro (one COM callback, in loops/player.rs) expands to
+# `::windows_core` paths, so the crate has to be named here. Already in the
+# tree as the windows crate's own dependency: no new download.
+windows-core = "0.58"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+  # Implementing a COM interface in Rust: the media engine's callback.
+  "implement",
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_System_LibraryLoader",
+  # Monitor enumeration for the desktop wallpaper. No new CRATES -- the windows
+  # crate is already a dependency, so this costs two feature flags.
+  "Win32_Devices_Display",
+  # Process names, so a leftover WS_EX_LAYERED is only stripped from windows
+  # belonging to a process panefx actually targets.
+  "Win32_System_Diagnostics_ToolHelp",
+  # GetCurrentProcessId, so "is a panefx-gui already open?" can skip the
+  # daemon's OWN windows -- one of those matching would mean the GUI never
+  # starts. Still NO new crates: one feature flag.
+  "Win32_System_Threading",
+  # Registering the bundled font for the user (panefx-setup): AddFontResourceW
+  # makes it work for THIS session, and the HKCU\...\Fonts value is what makes
+  # it survive a reboot. Both are needed -- one without the other means the
+  # font works until logout, or not until the next logon.
+  "Win32_System_Registry",
+  # RegCreateKeyExW takes a SECURITY_ATTRIBUTES pointer, so it is gated behind
+  # Win32_Security even though we pass None. Read from the crate source, not
+  # guessed.
+  "Win32_Security",
+  # System-tray icon. Shell_NotifyIconW lives here -- again NO new crates, the
+  # windows crate is already a dependency.
+  "Win32_UI_Shell",
+  # Presenting the desktop wallpaper through DirectComposition. GDI leaves the
+  # alpha channel at 0, and the raised desktop composites with alpha, so a
+  # GDI-blitted wallpaper renders ADDITIVELY over Explorer's own background
+  # instead of replacing it. See src/compositor.rs. Still NO new crates: the
+  # windows crate is already here, this is five feature flags.
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_DirectComposition",
+  # The native window source. DWMWA_EXTENDED_FRAME_BOUNDS is the VISIBLE
+  # edge of a window -- GetWindowRect includes an invisible resize border on
+  # standard windows, and a backdrop sized to that is visibly too big.
+  # DWMWA_CLOAKED is how a window on another virtual desktop is detected;
+  # such a window is still "visible" to IsWindowVisible.
+  "Win32_Graphics_Dwm",
+  # SetWinEventHook, for real move/resize notifications. GlazeWM emits none
+  # (see the ipc.rs header), so its backend re-queries on a 500ms poll.
+  "Win32_UI_Accessibility",
+  # Baked loops (src/loops): Windows' own H.264 encoder to record them and its
+  # media engine to play them on the GPU. Still NO new crates -- Media
+  # Foundation ships with Windows, so there is no ffmpeg to install either.
+  "Win32_Media",
+  "Win32_Media_MediaFoundation",
+  "Win32_System_Com",
+]
+
+[profile.release]
+opt-level = 3
+lto = true
+# LTO alone still leaves 16 codegen units for a binary; one unit lets the
+# optimiser see the whole crate and inline across module boundaries. The grid
+# loops in waves benefit most.
+codegen-units = 1
+# No unwinding tables. This is a background decoration -- if it panics it should
+# die, not try to unwind through GDI handles.
+panic = "abort"

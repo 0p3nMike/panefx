@@ -1,0 +1,2 @@
+# The deskfx recorder runs in WSL (bash, python): keep LF on a Windows checkout.
+tools/deskfx-bake/* text eol=lf
